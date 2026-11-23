@@ -99,6 +99,31 @@ async function initDb(customDbPath = null) {
     );
   `);
 
+  // Table: Pending user approval queue for WhatsApp & Google Drive uploads
+  await dbInstance.exec(`
+    CREATE TABLE IF NOT EXISTS pending_approvals (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      file_path TEXT NOT NULL,
+      file_name TEXT NOT NULL,
+      assignment_id TEXT NOT NULL,
+      subject TEXT NOT NULL,
+      title TEXT NOT NULL,
+      source TEXT NOT NULL,
+      status TEXT DEFAULT 'PENDING',
+      created_at TEXT NOT NULL
+    );
+  `);
+
+  // Table: Processed Google Drive file IDs to prevent duplicate downloads
+  await dbInstance.exec(`
+    CREATE TABLE IF NOT EXISTS processed_drive_files (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      drive_file_id TEXT UNIQUE NOT NULL,
+      file_name TEXT NOT NULL,
+      downloaded_at TEXT NOT NULL
+    );
+  `);
+
   return dbInstance;
 }
 
@@ -298,6 +323,65 @@ async function recordAuditLog(action, details = '') {
 }
 
 /**
+ * Saves a new pending assignment approval request
+ */
+async function savePendingApproval({ filePath, fileName, assignmentId, subject, title, source }) {
+  const db = await initDb();
+  const now = new Date().toISOString();
+
+  // Cancel any existing PENDING approval for this assignment to keep queue clean
+  await db.run(
+    "UPDATE pending_approvals SET status = 'SUPERSEDED' WHERE assignment_id = ? AND status = 'PENDING'",
+    [assignmentId]
+  );
+
+  const result = await db.run(
+    `INSERT INTO pending_approvals (file_path, file_name, assignment_id, subject, title, source, status, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, 'PENDING', ?)`,
+    [filePath, fileName, assignmentId, subject, title, source, now]
+  );
+
+  return result.lastID;
+}
+
+/**
+ * Gets the most recent PENDING approval record
+ */
+async function getLatestPendingApproval() {
+  const db = await initDb();
+  return db.get("SELECT * FROM pending_approvals WHERE status = 'PENDING' ORDER BY id DESC LIMIT 1");
+}
+
+/**
+ * Marks a pending approval as APPROVED, CANCELLED, etc.
+ */
+async function resolvePendingApproval(id, status = 'APPROVED') {
+  const db = await initDb();
+  await db.run('UPDATE pending_approvals SET status = ? WHERE id = ?', [status, id]);
+}
+
+/**
+ * Checks if a Google Drive file ID has already been processed
+ */
+async function isDriveFileProcessed(driveFileId) {
+  const db = await initDb();
+  const row = await db.get('SELECT id FROM processed_drive_files WHERE drive_file_id = ?', [driveFileId]);
+  return !!row;
+}
+
+/**
+ * Marks a Google Drive file ID as processed
+ */
+async function markDriveFileProcessed(driveFileId, fileName) {
+  const db = await initDb();
+  const now = new Date().toISOString();
+  await db.run(
+    'INSERT OR REPLACE INTO processed_drive_files (drive_file_id, file_name, downloaded_at) VALUES (?, ?, ?)',
+    [driveFileId, fileName, now]
+  );
+}
+
+/**
  * Closes the database connection
  */
 async function closeDb() {
@@ -321,6 +405,11 @@ module.exports = {
   recordSubmission,
   getSubmissions,
   recordAuditLog,
+  savePendingApproval,
+  getLatestPendingApproval,
+  resolvePendingApproval,
+  isDriveFileProcessed,
+  markDriveFileProcessed,
   closeDb,
 };
 

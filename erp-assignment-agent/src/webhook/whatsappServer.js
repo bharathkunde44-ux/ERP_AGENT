@@ -8,11 +8,16 @@
 const express = require('express');
 const fs = require('fs');
 const path = require('path');
+const axios = require('axios');
 const { config } = require('../config/env');
 const db = require('../db/database');
 const notifier = require('../notifications/notifier');
 const drafter = require('../agent/drafter');
 const orchestrator = require('../agent/orchestrator');
+const erp = require('../browser/erpAutomation');
+const scanner = require('../scanner/folderScanner');
+const { matchAssignmentForFile } = require('../agent/assignmentMatcher');
+const driveSync = require('../services/driveSync');
 
 let serverInstance = null;
 
@@ -58,12 +63,6 @@ function createWebhookApp() {
       // If event is not an incoming user message, ignore
       if (!message) return;
 
-      // Only text messages trigger commands
-      if (message.type !== 'text') {
-        console.log(`[WhatsApp Webhook] Received non-text message type (${message.type}). Ignoring.`);
-        return;
-      }
-
       // Security Guard: Verify sender phone against config.whatsapp.recipientPhone
       const senderDigits = (message.from || '').replace(/\D/g, '');
       const allowedDigits = (config.whatsapp.recipientPhone || '').replace(/\D/g, '');
@@ -72,6 +71,25 @@ function createWebhookApp() {
         console.warn(
           `[WhatsApp Webhook Security] Blocked unauthorized message from ${message.from} (Expected: ${config.whatsapp.recipientPhone})`
         );
+        return;
+      }
+
+      // Channel A: Handle Document Uploads (PDF/DOCX)
+      if (message.type === 'document') {
+        const docName = message.document?.filename || 'document';
+        console.log(`[WhatsApp Webhook] Incoming document from student (${message.from}): "${docName}"`);
+        handleIncomingDocument(message).catch((err) => {
+          console.error(`[WhatsApp Document Error]: ${err.message}`);
+          notifier.sendWhatsAppMessage({
+            textMessage: `⚠️ *Document Upload Error:* ${err.message}`,
+          });
+        });
+        return;
+      }
+
+      // Only text messages trigger commands beyond this point
+      if (message.type !== 'text') {
+        console.log(`[WhatsApp Webhook] Received unsupported message type (${message.type}). Ignoring.`);
         return;
       }
 
@@ -94,6 +112,100 @@ function createWebhookApp() {
 }
 
 /**
+ * Handles incoming document messages (PDF/DOCX) from Meta WhatsApp Cloud API
+ */
+async function handleIncomingDocument(message) {
+  const mediaId = message.document?.id;
+  const originalName = message.document?.filename || 'document.pdf';
+  const caption = (message.document?.caption || '').trim();
+
+  const ext = path.extname(originalName).toLowerCase();
+  if (ext !== '.pdf' && ext !== '.docx') {
+    await notifier.sendWhatsAppMessage({
+      textMessage: `⚠️ *Unsupported file format:* "${originalName}". Only *.pdf* and *.docx* files can be submitted to Sidus ERP.`,
+    });
+    return;
+  }
+
+  // Immediate acknowledgement
+  await notifier.sendWhatsAppMessage({
+    textMessage: `📥 *Document Received:* \`${originalName}\`${caption ? `\n_Caption:_ "${caption}"` : ''}\nDownloading and matching against active Sidus deadlines...`,
+  });
+
+  const downloadDir = config.paths.collegeAssignments;
+  if (!fs.existsSync(downloadDir)) {
+    fs.mkdirSync(downloadDir, { recursive: true });
+  }
+
+  const sanitizedName = originalName.replace(/[^a-zA-Z0-9._-]/g, '_');
+  const targetPath = path.join(downloadDir, sanitizedName);
+
+  // 1. Fetch Media URL from Meta Cloud API
+  const metaUrl = `https://graph.facebook.com/${config.whatsapp.apiVersion}/${mediaId}`;
+  const metaRes = await axios.get(metaUrl, {
+    headers: { Authorization: `Bearer ${config.whatsapp.apiToken}` },
+    timeout: 20000,
+  });
+
+  const downloadUrl = metaRes.data?.url;
+  if (!downloadUrl) {
+    throw new Error('Meta did not return a valid download URL for the document.');
+  }
+
+  // 2. Download binary file buffer using Bearer token
+  const fileRes = await axios.get(downloadUrl, {
+    headers: { Authorization: `Bearer ${config.whatsapp.apiToken}` },
+    responseType: 'arraybuffer',
+    timeout: 30000,
+  });
+
+  fs.writeFileSync(targetPath, Buffer.from(fileRes.data));
+  console.log(`[WhatsApp Webhook] Downloaded document to: ${targetPath}`);
+
+  // 3. Extract text content quietly
+  let extractedText = '';
+  try {
+    if (ext === '.pdf') {
+      extractedText = await scanner.extractTextFromPdf(targetPath);
+    } else if (ext === '.docx') {
+      extractedText = await scanner.extractTextFromDocx(targetPath);
+    }
+  } catch (_) {}
+
+  // 4. Match file to active Sidus FILE UPLOAD assignments
+  const matchResult = await matchAssignmentForFile({
+    fileName: sanitizedName,
+    caption,
+    extractedText,
+  });
+
+  if (matchResult.matched && matchResult.assignment) {
+    const asgt = matchResult.assignment;
+    console.log(`[WhatsApp Webhook] Matched "${sanitizedName}" to [${asgt.subject}] ${asgt.title} (Score: ${matchResult.score}%)`);
+
+    // Save pending approval in SQLite
+    await db.savePendingApproval({
+      filePath: targetPath,
+      fileName: sanitizedName,
+      assignmentId: asgt.assignment_id || asgt.assignmentId,
+      subject: asgt.subject,
+      title: asgt.title,
+      source: 'WhatsApp',
+    });
+
+    const promptMsg = `📄 *File ready (WhatsApp):* \`${sanitizedName}\`\n🎯 *Matched to:* *${asgt.subject}* - *${asgt.title}*\n\nReply *approve* to submit to Sidus, or *cancel* to skip.`;
+    await notifier.sendWhatsAppMessage({ textMessage: promptMsg });
+  } else {
+    console.log(`[WhatsApp Webhook] Could not match "${sanitizedName}" to an active assignment.`);
+    const pendingList = matchResult.availableDeadlines || [];
+    const asgtList = pendingList.map((d) => `• *[${d.subject}]* ${d.title}`).join('\n') || '(No active FILE UPLOAD assignments)';
+
+    const unassignedMsg = `📄 *Document Received:* \`${sanitizedName}\`\n❓ *Could not confidently match to an active assignment.*${caption ? `\n_Caption received:_ "${caption}"` : ''}\n\n*Active FILE UPLOAD Assignments:*\n${asgtList}\n\nPlease resend the document with a caption matching your subject (e.g. *cs210 lab 5*).`;
+    await notifier.sendWhatsAppMessage({ textMessage: unassignedMsg });
+  }
+}
+
+/**
  * Parses and executes incoming user commands, replying via WhatsApp
  */
 async function handleWhatsAppCommand(rawText) {
@@ -106,6 +218,15 @@ async function handleWhatsAppCommand(rawText) {
 
 Here are the commands you can send me:
 
+📄 *Send PDF/DOCX Document*
+Send any finished assignment file directly in this chat with an optional caption (e.g. "cs210 lab 5").
+
+✅ *approve* or *yes*
+Confirm and submit the pending assignment to the Sidus portal.
+
+🚫 *cancel* or *no*
+Cancel the pending assignment submission.
+
 📋 *status* or *deadlines*
 View all active Sidus assignments grouped by deadline urgency.
 
@@ -113,7 +234,7 @@ View all active Sidus assignments grouped by deadline urgency.
 Generate an AI draft or outline (e.g., *draft ec201*, *draft cs210*, *draft ds201*, *draft cs209*, *draft ma113*).
 
 🔄 *scan* or *run*
-Trigger an immediate Sidus portal scrape and local file submission check.
+Trigger an immediate Sidus portal scrape, Google Drive sync, and file check.
 
 📁 *files*
 List all completed PDFs and DOCXs in your assignment folder.
@@ -121,9 +242,76 @@ List all completed PDFs and DOCXs in your assignment folder.
 ❓ *help*
 Display this command menu.
 
-_Send any command anytime right here in this chat!_`;
+_Send any command or document anytime right here in this chat!_`;
 
     await notifier.sendWhatsAppMessage({ textMessage: helpMsg });
+    return;
+  }
+
+  // Command: APPROVE / YES / CONFIRM / SUBMIT
+  if (lower === 'approve' || lower === 'yes' || lower === 'confirm' || lower === 'submit') {
+    const pending = await db.getLatestPendingApproval();
+    if (!pending) {
+      await notifier.sendWhatsAppMessage({
+        textMessage: 'ℹ️ *No pending assignment approvals found.*\nSend a PDF/DOCX document here or drop a file in Google Drive to start.',
+      });
+      return;
+    }
+
+    if (!fs.existsSync(pending.file_path)) {
+      await notifier.sendWhatsAppMessage({
+        textMessage: `⚠️ *File not found:* \`${pending.file_name}\` is no longer on disk. Please resend the document.`,
+      });
+      await db.resolvePendingApproval(pending.id, 'EXPIRED');
+      return;
+    }
+
+    await notifier.sendWhatsAppMessage({
+      textMessage: `⏳ *Approving submission...*\nUploading \`${pending.file_name}\` for *${pending.title}* to Sidus portal. This takes ~30 seconds.`,
+    });
+
+    try {
+      const subResult = await erp.submitAssignment({
+        portalUrl: config.erp.portalUrl,
+        assignmentId: pending.assignment_id,
+        filePath: pending.file_path,
+        dryRun: false,
+        confidenceScore: 100,
+        reasoning: `Approved by student via WhatsApp command (${pending.source} upload).`,
+      });
+
+      if (subResult && subResult.success) {
+        await db.resolvePendingApproval(pending.id, 'APPROVED');
+        const successMsg = `🎉 *Submission Successful!*\n\n• *Subject:* ${pending.subject}\n• *Assignment:* ${pending.title}\n• *File:* \`${pending.file_name}\`\n• *Source:* ${pending.source}\n• *Time:* ${new Date().toLocaleString()}\n\nProof screenshot recorded. Great job!`;
+        await notifier.sendWhatsAppMessage({ textMessage: successMsg });
+      } else {
+        await notifier.sendWhatsAppMessage({
+          textMessage: `❌ *Submission Failed:* ${subResult ? subResult.message : 'Upload failed on portal.'}\n\nYou can reply *approve* to retry, or *cancel* to skip.`,
+        });
+      }
+    } catch (subErr) {
+      console.error('[WhatsApp Approval Error]:', subErr.message);
+      await notifier.sendWhatsAppMessage({
+        textMessage: `❌ *Submission Error:* ${subErr.message}\n\nYou can reply *approve* to retry, or *cancel* to skip.`,
+      });
+    }
+    return;
+  }
+
+  // Command: CANCEL / NO / SKIP / ABORT
+  if (lower === 'cancel' || lower === 'no' || lower === 'skip' || lower === 'abort') {
+    const pending = await db.getLatestPendingApproval();
+    if (!pending) {
+      await notifier.sendWhatsAppMessage({
+        textMessage: 'ℹ️ *No pending approvals to cancel.*',
+      });
+      return;
+    }
+
+    await db.resolvePendingApproval(pending.id, 'CANCELLED');
+    await notifier.sendWhatsAppMessage({
+      textMessage: `🚫 *Submission Cancelled.*\nSkipped submitting \`${pending.file_name}\` for *${pending.title}*.`,
+    });
     return;
   }
 
@@ -213,8 +401,15 @@ _Send any command anytime right here in this chat!_`;
   // Command: SCAN / RUN
   if (lower === 'scan' || lower === 'run') {
     await notifier.sendWhatsAppMessage({
-      textMessage: '🔄 *Starting live Sidus scrape & folder scan...*\nChecking portal deadlines and matching assignments.',
+      textMessage: '🔄 *Starting live Sidus scrape & folder scan...*\nChecking portal deadlines, Google Drive shared folder, and local files.',
     });
+
+    // Check Google Drive shared folder for new files
+    try {
+      await driveSync.syncGoogleDriveFiles();
+    } catch (driveErr) {
+      console.warn('[WhatsApp Scan] Google Drive sync notice:', driveErr.message);
+    }
 
     const cycleResult = await orchestrator.runAgentCycle({ dryRun: false });
 

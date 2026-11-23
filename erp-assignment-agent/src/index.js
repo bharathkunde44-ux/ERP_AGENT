@@ -21,6 +21,7 @@ const orchestrator = require('./agent/orchestrator');
 const { startWhatsAppWebhookServer, stopWhatsAppWebhookServer } = require('./webhook/whatsappServer');
 const { startFolderWatcher, stopFolderWatcher } = require('./scanner/folderWatcher');
 const { startMockServer, stopMockServer } = require('../mock_erp/mockServer');
+const driveSync = require('./services/driveSync');
 
 const args = process.argv.slice(2);
 const isLoginMode = args.includes('--login');
@@ -118,6 +119,7 @@ async function main() {
 
   // Run initial cycle immediately
   try {
+    await driveSync.syncGoogleDriveFiles().catch((e) => console.warn('[System] Drive sync notice:', e.message));
     await orchestrator.runAgentCycle({ dryRun: isDryRun });
   } catch (err) {
     console.error('[System] Initial cycle error:', err.message);
@@ -127,6 +129,7 @@ async function main() {
   const scheduledTask = cron.schedule(config.agent.cronSchedule, async () => {
     console.log(`\n[Cron Trigger] Scheduled check fired at ${new Date().toLocaleTimeString()}...`);
     try {
+      await driveSync.syncGoogleDriveFiles().catch((e) => console.warn('[System] Drive sync notice:', e.message));
       await orchestrator.runAgentCycle({ dryRun: isDryRun });
     } catch (err) {
       console.error('[System] Scheduled cycle error:', err.message);

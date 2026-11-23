@@ -65,6 +65,12 @@ const config = {
     verifyToken: process.env.WHATSAPP_VERIFY_TOKEN || 'sidus_erp_verify_2026',
   },
 
+  // Google Drive Shared Folder Sync Configuration
+  googleDrive: {
+    apiKey: process.env.GOOGLE_DRIVE_API_KEY || '',
+    folderId: process.env.GOOGLE_DRIVE_FOLDER_ID || '',
+  },
+
   // Agent Autonomous Decisions & Thresholds
   agent: {
     // Minimum matching confidence percentage (0-100) needed to trigger auto-submit
