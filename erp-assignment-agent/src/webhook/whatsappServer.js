@@ -20,14 +20,13 @@ function createWebhookApp() {
   const app = express();
   app.use(express.json());
 
-  // Health check endpoint
+  // Health check endpoints
   app.get('/', (req, res) => {
-    res.json({
-      status: 'active',
-      service: 'Autonomous ERP WhatsApp Webhook',
-      model: config.groq.model,
-      time: new Date().toISOString(),
-    });
+    res.status(200).send('OK');
+  });
+
+  app.get('/health', (req, res) => {
+    res.status(200).send('OK');
   });
 
   // 1. Meta Webhook Verification Handshake
