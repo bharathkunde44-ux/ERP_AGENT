@@ -36,8 +36,9 @@ const config = {
   // ERP Portal Configuration
   erp: {
     portalUrl: (process.env.ERP_PORTAL_URL || 'https://www.sidus.net/modules/assessments/assessments').replace(/\/+$/, ''),
-    username: process.env.ERP_USERNAME || '',
-    password: process.env.ERP_PASSWORD || '',
+    username: process.env.SIDUS_EMAIL || process.env.ERP_USERNAME || '',
+    password: process.env.SIDUS_PASSWORD || process.env.ERP_PASSWORD || '',
+    authB64: process.env.SIDUS_AUTH_B64 || '',
   },
 
   // Email Notification Configuration (Nodemailer / SMTP)

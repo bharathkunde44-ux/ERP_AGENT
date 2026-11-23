@@ -29,19 +29,63 @@ async function launchBrowser(customHeadless = null) {
 
   const isHeadless = customHeadless !== null ? customHeadless : config.agent.headless;
 
-  const context = await chromium.launchPersistentContext(sessionDir, {
+  let storageStateOption = undefined;
+  let decodedState = null;
+
+  // 1. Support SIDUS_AUTH_B64 (Base64-encoded storageState JSON)
+  const authB64 = (process.env.SIDUS_AUTH_B64 || config.erp.authB64 || '').trim();
+  if (authB64) {
+    try {
+      const rawJson = Buffer.from(authB64, 'base64').toString('utf8');
+      decodedState = JSON.parse(rawJson);
+      const stateFilePath = path.join(sessionDir, 'sidus_storage_state.json');
+      fs.writeFileSync(stateFilePath, rawJson, 'utf8');
+      storageStateOption = stateFilePath;
+      console.log('[Browser] Successfully decoded and applied SIDUS_AUTH_B64 storageState.');
+    } catch (err) {
+      console.warn('[Browser] Warning: Failed to parse SIDUS_AUTH_B64 as JSON:', err.message);
+    }
+  } else {
+    const existingState = path.join(sessionDir, 'sidus_storage_state.json');
+    if (fs.existsSync(existingState)) {
+      storageStateOption = existingState;
+    }
+  }
+
+  const launchOptions = {
     headless: isHeadless,
     viewport: { width: 1280, height: 800 },
     userAgent:
       'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-    args: ['--disable-blink-features=AutomationControlled'],
-  });
+    args: [
+      '--disable-blink-features=AutomationControlled',
+      '--no-sandbox',
+      '--disable-setuid-sandbox',
+      '--disable-dev-shm-usage',
+    ],
+  };
+
+  if (storageStateOption) {
+    launchOptions.storageState = storageStateOption;
+  }
+
+  const context = await chromium.launchPersistentContext(sessionDir, launchOptions);
+
+  if (decodedState && Array.isArray(decodedState.cookies) && decodedState.cookies.length > 0) {
+    try {
+      await context.addCookies(decodedState.cookies);
+      console.log(`[Browser] Injected ${decodedState.cookies.length} session cookies into context.`);
+    } catch (err) {
+      console.warn('[Browser] Warning injecting cookies:', err.message);
+    }
+  }
 
   return context;
 }
 
 /**
  * Helper: Strictly waits until Sidus renders "View assessments" or assessment table rows.
+ * If redirected to /login, attempts automated headless login with credentials if provided.
  */
 async function ensureSidusLoadedAndAuthenticated(page, targetUrl) {
   const hasAssessmentsRendered = async () => {
@@ -50,6 +94,7 @@ async function ensureSidusLoadedAndAuthenticated(page, targetUrl) {
     return viewCount > 0 || rowCount > 0;
   };
 
+  // Quick check: If already authenticated and rendered, return immediately
   for (let i = 0; i < 6; i++) {
     if (await hasAssessmentsRendered()) {
       await page.waitForTimeout(1000);
@@ -58,31 +103,151 @@ async function ensureSidusLoadedAndAuthenticated(page, targetUrl) {
     await page.waitForTimeout(1000);
   }
 
-  console.log(`\n[Browser Scraper] Current Page URL: ${page.url()}`);
-  console.log('='.repeat(68));
-  console.log('[Browser] WAITING FOR SIDUS ASSESSMENTS CARDS TO APPEAR...');
-  console.log(' -> If the Chrome window shows a Login screen, please sign in now.');
-  console.log(' -> Once "View assessments" cards appear, scraping will start!');
-  console.log('='.repeat(68) + '\n');
+  const currentUrl = page.url();
+  console.log(`\n[Browser Scraper] Current Page URL: ${currentUrl}`);
 
-  try {
-    const userField = page
-      .locator('input[type="email"], input[type="text"], input[name*="user"], input[name*="email"]')
-      .first();
-    const passField = page.locator('input[type="password"]').first();
-    if ((await userField.count()) > 0 && config.erp.username && config.erp.username !== 'student_2026') {
-      await userField.fill(config.erp.username);
-    }
-    if ((await passField.count()) > 0 && config.erp.password && config.erp.password !== 'student_pass_secure') {
-      await passField.fill(config.erp.password);
-    }
-  } catch (_) { }
+  const isLoginPage =
+    currentUrl.toLowerCase().includes('login') ||
+    currentUrl.toLowerCase().includes('auth') ||
+    (await page.locator('input[type="password"]').count().catch(() => 0)) > 0;
 
-  const maxWaitLoops = 90;
+  const sidusEmail = (process.env.SIDUS_EMAIL || config.erp.username || '').trim();
+  const sidusPass = (process.env.SIDUS_PASSWORD || config.erp.password || '').trim();
+
+  if (isLoginPage) {
+    console.log('='.repeat(68));
+    console.log('[Browser] SIDUS LOGIN PAGE DETECTED');
+    if (sidusEmail && sidusPass && sidusEmail !== 'student_2026' && sidusPass !== 'student_pass_secure') {
+      console.log(`[Browser] Performing automated login for "${sidusEmail}"...`);
+      try {
+        const emailSelectors = [
+          'input[type="email"]',
+          'input[name*="email" i]',
+          'input[name*="user" i]',
+          'input[id*="email" i]',
+          'input[id*="user" i]',
+          'input[placeholder*="email" i]',
+          'input[type="text"]',
+        ];
+        let userField = null;
+        for (const sel of emailSelectors) {
+          const loc = page.locator(sel).first();
+          if ((await loc.count().catch(() => 0)) > 0 && (await loc.isVisible().catch(() => false))) {
+            userField = loc;
+            break;
+          }
+        }
+        if (!userField) {
+          const fallbackUser = page.locator('input[type="email"], input[type="text"]').first();
+          if ((await fallbackUser.count().catch(() => 0)) > 0) userField = fallbackUser;
+        }
+
+        const passSelectors = [
+          'input[type="password"]',
+          'input[name*="pass" i]',
+          'input[id*="pass" i]',
+        ];
+        let passField = null;
+        for (const sel of passSelectors) {
+          const loc = page.locator(sel).first();
+          if ((await loc.count().catch(() => 0)) > 0 && (await loc.isVisible().catch(() => false))) {
+            passField = loc;
+            break;
+          }
+        }
+        if (!passField) {
+          const fallbackPass = page.locator('input[type="password"]').first();
+          if ((await fallbackPass.count().catch(() => 0)) > 0) passField = fallbackPass;
+        }
+
+        if (userField && passField) {
+          await userField.fill(sidusEmail);
+          await page.waitForTimeout(300);
+          await passField.fill(sidusPass);
+          await page.waitForTimeout(300);
+          console.log('[Browser] Credentials entered into login form.');
+
+          const submitSelectors = [
+            'button[type="submit"]',
+            'input[type="submit"]',
+            'button:has-text("Log In")',
+            'button:has-text("Login")',
+            'button:has-text("Sign In")',
+            'button:has-text("Submit")',
+            'form button',
+          ];
+          let submitBtn = null;
+          for (const sel of submitSelectors) {
+            const btn = page.locator(sel).first();
+            if ((await btn.count().catch(() => 0)) > 0 && (await btn.isVisible().catch(() => false))) {
+              submitBtn = btn;
+              break;
+            }
+          }
+
+          if (submitBtn) {
+            console.log('[Browser] Submitting login form via button click...');
+            await Promise.all([
+              page.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: 20000 }).catch(() => {}),
+              submitBtn.click().catch(() => {}),
+            ]);
+          } else {
+            console.log('[Browser] Submitting login form via Enter key...');
+            await Promise.all([
+              page.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: 20000 }).catch(() => {}),
+              passField.press('Enter').catch(() => {}),
+            ]);
+          }
+
+          await page.waitForTimeout(3000);
+          console.log(`[Browser] Post-login URL: ${page.url()}`);
+
+          const postUrl = page.url().toLowerCase();
+          if (postUrl.includes('sidus.net') && !postUrl.includes('login') && !postUrl.includes('auth')) {
+            console.log('[Browser] Automated login succeeded!');
+            try {
+              const sessionDir = config.paths.browserSession;
+              const stateFile = path.join(sessionDir, 'sidus_storage_state.json');
+              await page.context().storageState({ path: stateFile }).catch(() => {});
+              console.log('[Browser] Persisted updated session state to sidus_storage_state.json');
+            } catch (_) {}
+
+            if (!postUrl.includes('/assessments')) {
+              console.log(`[Browser] Redirecting to target assessments page: ${targetUrl}`);
+              await page.goto(targetUrl, { waitUntil: 'domcontentloaded', timeout: 30000 }).catch(() => {});
+            }
+          } else {
+            const errorText = await page.locator('.alert-danger, .error-message, [role="alert"]').innerText().catch(() => '');
+            if (errorText) {
+              console.error(`[Browser] Login warning/error message on page: ${errorText.trim()}`);
+            }
+          }
+        } else {
+          console.warn('[Browser] Could not locate username or password input fields on login page.');
+        }
+      } catch (loginErr) {
+        console.error('[Browser] Automated login attempt encountered error:', loginErr.message);
+      }
+    } else {
+      console.log('[Browser] WAITING FOR SIDUS ASSESSMENTS CARDS TO APPEAR...');
+      console.log(' -> If running interactively, please sign in now in the browser window.');
+      console.log(' -> Once "View assessments" cards appear, scraping will start!');
+    }
+    console.log('='.repeat(68) + '\n');
+  }
+
+  const isHeadless = config.agent.headless;
+  const maxWaitLoops = isHeadless ? 25 : 90; // 50s in headless, 180s in interactive
   for (let loop = 0; loop < maxWaitLoops; loop++) {
     if (await hasAssessmentsRendered()) {
       console.log('[Browser] Assessments cards detected on page!');
       await page.waitForTimeout(1500);
+
+      try {
+        const stateFile = path.join(config.paths.browserSession, 'sidus_storage_state.json');
+        await page.context().storageState({ path: stateFile }).catch(() => {});
+      } catch (_) {}
+
       return;
     }
 
@@ -94,11 +259,13 @@ async function ensureSidusLoadedAndAuthenticated(page, targetUrl) {
       !curUrl.includes('/assessments')
     ) {
       console.log('[Browser] Logged in! Redirecting to Assessments module...');
-      await page.goto(targetUrl, { waitUntil: 'domcontentloaded', timeout: 30000 }).catch(() => { });
+      await page.goto(targetUrl, { waitUntil: 'domcontentloaded', timeout: 30000 }).catch(() => {});
     }
 
     await page.waitForTimeout(2000);
   }
+
+  console.warn(`[Browser] Finished waiting (${maxWaitLoops * 2}s). Current URL: ${page.url()}`);
 }
 
 /**
@@ -139,6 +306,13 @@ async function loginInteractive({ portalUrl = null } = {}) {
     await ensureSidusLoadedAndAuthenticated(page, url);
 
     console.log('[Browser] Interactive session verified and saved successfully!');
+    try {
+      const stateFile = path.join(config.paths.browserSession, 'sidus_storage_state.json');
+      await context.storageState({ path: stateFile });
+      const b64 = Buffer.from(fs.readFileSync(stateFile, 'utf8')).toString('base64');
+      console.log('\n[Session Export] Generated SIDUS_AUTH_B64 (copy this to Render if needed):');
+      console.log(b64);
+    } catch (_) {}
     await db.recordAuditLog('INTERACTIVE_LOGIN', { portalUrl: url, status: 'SUCCESS' });
   } finally {
     await context.close();
