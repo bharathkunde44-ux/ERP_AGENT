@@ -1,0 +1,45 @@
+{
+  "name": "erp-assignment-agent",
+  "version": "1.0.0",
+  "description": "Autonomous AI Agent in Node.js for College ERP Deadline Monitoring and Auto-Submission",
+  "main": "src/index.js",
+  "type": "commonjs",
+  "scripts": {
+    "start": "node src/index.js",
+    "login": "node src/index.js --login",
+    "run-once": "node src/index.js --run-once",
+    "mock": "node src/index.js --mock",
+    "mock:run-once": "node src/index.js --mock --run-once",
+    "mock:dry-run": "node src/index.js --mock --dry-run --run-once",
+    "mock-server": "node mock_erp/mockServer.js",
+    "reset": "node scripts/resetAgentState.js",
+    "daemon:start": "pm2 start ../ecosystem.config.js",
+    "daemon:stop": "pm2 stop sidus-erp-agent",
+    "daemon:logs": "pm2 logs sidus-erp-agent"
+  },
+  "keywords": [
+    "ai-agent",
+    "erp",
+    "groq",
+    "playwright",
+    "autonomous",
+    "assignment-solver"
+  ],
+  "author": "",
+  "license": "MIT",
+  "dependencies": {
+    "axios": "^1.7.9",
+    "cookie-parser": "^1.4.7",
+    "dotenv": "^16.4.7",
+    "express": "^4.21.2",
+    "groq-sdk": "^0.15.0",
+    "mammoth": "^1.9.0",
+    "multer": "^1.4.5-lts.1",
+    "node-cron": "^3.0.3",
+    "nodemailer": "^6.10.0",
+    "pdf-parse": "^1.1.1",
+    "playwright": "^1.50.1",
+    "sqlite": "^5.1.1",
+    "sqlite3": "^5.1.7"
+  }
+}

@@ -1,0 +1,18 @@
+{
+  "name": "college-erp-assignment-agent-root",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "start": "npm --prefix erp-assignment-agent start",
+    "login": "npm --prefix erp-assignment-agent run login",
+    "run-once": "npm --prefix erp-assignment-agent run run-once",
+    "mock": "npm --prefix erp-assignment-agent run mock",
+    "mock:run-once": "npm --prefix erp-assignment-agent run mock:run-once",
+    "mock:dry-run": "npm --prefix erp-assignment-agent run mock:dry-run",
+    "mock-server": "npm --prefix erp-assignment-agent run mock-server",
+    "reset": "npm --prefix erp-assignment-agent run reset",
+    "daemon:start": "pm2 start ecosystem.config.js",
+    "daemon:stop": "pm2 stop sidus-erp-agent",
+    "daemon:logs": "pm2 logs sidus-erp-agent"
+  }
+}

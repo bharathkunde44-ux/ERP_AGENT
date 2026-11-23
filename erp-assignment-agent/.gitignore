@@ -1,0 +1,29 @@
+# Dependencies
+node_modules/
+
+# Environment Variables
+.env
+
+# Playwright Browser Persistent Session / Cookies
+browser_session/
+*.crx
+
+# SQLite Database and WAL files
+agent_data.db
+agent_data.db-journal
+agent_data.db-wal
+agent_data.db-shm
+
+# Submission Screenshots (keep directory)
+screenshots/*
+!screenshots/.gitkeep
+
+# Mock ERP uploads
+mock_erp/uploads/*
+!mock_erp/uploads/.gitkeep
+
+# Logs and OS files
+*.log
+.DS_Store
+Thumbs.db
+
