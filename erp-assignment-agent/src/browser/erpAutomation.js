@@ -411,6 +411,59 @@ async function extractTableRowsOnCurrentTab(page, tabName, url, subjectIdx) {
 }
 
 /**
+ * Helper: Reliably navigates back from a subject assessment table to the cards list.
+ * Avoids accidentally clicking "Back to Dashboard", and waits for subject cards to load.
+ */
+async function navigateBackToSubjectCards(page, url) {
+  try {
+    // 1. Try finding the inner back button inside the main container (NOT the sidebar Back to Dashboard)
+    const chevronBtns = page.locator('main button:has(svg.lucide-chevron-left), [role="main"] button:has(svg.lucide-chevron-left), button:has(svg.lucide-chevron-left)');
+    const count = await chevronBtns.count();
+    let clicked = false;
+
+    for (let c = 0; c < count; c++) {
+      const btn = chevronBtns.nth(c);
+      const txt = (await btn.innerText().catch(() => '')).trim();
+      // Skip the sidebar "Back to Dashboard" button
+      if (!/Dashboard/i.test(txt)) {
+        await btn.click().catch(() => {});
+        clicked = true;
+        break;
+      }
+    }
+
+    // 2. Poll up to 10 seconds for subject cards to reload
+    for (let w = 0; w < 10; w++) {
+      const cardCount = await page.getByText(/View assessments/i).count().catch(() => 0);
+      if (cardCount > 0) {
+        await page.waitForTimeout(800);
+        return cardCount;
+      }
+      await page.waitForTimeout(1000);
+    }
+
+    // 3. Fallback: If cards haven't reappeared, navigate to portal URL
+    console.log('[Browser Scraper] Navigating to assessments URL to restore subject cards...');
+    await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30000 }).catch(() => {});
+    await ensureSidusLoadedAndAuthenticated(page, url);
+
+    for (let w = 0; w < 10; w++) {
+      const cardCount = await page.getByText(/View assessments/i).count().catch(() => 0);
+      if (cardCount > 0) {
+        await page.waitForTimeout(800);
+        return cardCount;
+      }
+      await page.waitForTimeout(1000);
+    }
+  } catch (err) {
+    console.warn('[Browser Scraper] Notice during back navigation:', err.message);
+    await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30000 }).catch(() => {});
+  }
+
+  return await page.getByText(/View assessments/i).count().catch(() => 0);
+}
+
+/**
  * Scrapes all Ongoing deadlines across all subjects and tabs (Theory, Lab, Project) on sidus.net
  * Also marks stale DB deadlines that are no longer Ongoing on the portal as CLOSED_ON_PORTAL.
  */
@@ -444,38 +497,65 @@ async function scrapeAssignments(customPageOrOptions = null, customUrl = null) {
     }
     await page.screenshot({ path: path.join(screenshotsDir, 'debug_scrape.png'), fullPage: true });
 
-    const backBtn = page.locator('button:has(svg.lucide-chevron-left)').first();
-    if ((await page.locator('table tbody tr').count()) > 0 && (await backBtn.count()) > 0) {
-      await backBtn.click().catch(() => { });
-      await page.waitForTimeout(1500);
+    // If an inner assessment table is open on page load, navigate back to cards
+    if ((await page.locator('table tbody tr').count()) > 0) {
+      console.log('[Browser Scraper] Inner table view detected on load. Navigating to subject cards list...');
+      await navigateBackToSubjectCards(page, url);
     }
+
+    // Scroll to reveal all subject cards (handling any lazy loading / infinite scroll)
+    for (let s = 0; s < 4; s++) {
+      await page.evaluate(() => window.scrollBy(0, 500));
+      await page.waitForTimeout(300);
+    }
+    await page.evaluate(() => window.scrollTo(0, 0));
+    await page.waitForTimeout(500);
 
     const viewButtons = page.getByText(/View assessments/i);
     const totalSubjects = await viewButtons.count();
     console.log(`[Browser Scraper] Found ${totalSubjects} subject card(s) on Sidus.`);
 
     for (let i = 0; i < totalSubjects; i++) {
+      let subjectHeader = `Subject_${i + 1}`;
+      let subjectOngoingCount = 0;
+
       try {
-        const currentViewButtons = page.getByText(/View assessments/i);
-        if (i >= (await currentViewButtons.count())) break;
+        let currentViewButtons = page.getByText(/View assessments/i);
+        let currentCount = await currentViewButtons.count();
+
+        // If cards aren't ready or count is insufficient, reload cards
+        if (currentCount <= i) {
+          console.log(`[Browser Scraper] Subject cards re-rendering (current: ${currentCount} <= target index: ${i}). Waiting for cards...`);
+          currentCount = await navigateBackToSubjectCards(page, url);
+          currentViewButtons = page.getByText(/View assessments/i);
+        }
+
+        if (currentCount <= i) {
+          console.warn(`[Browser Scraper] Card index ${i} exceeds available cards (${currentCount}). Ending loop.`);
+          break;
+        }
 
         const buttonEl = currentViewButtons.nth(i);
+        await buttonEl.scrollIntoViewIfNeeded().catch(() => {});
+        await page.waitForTimeout(200);
+
         const cardText = await getSubjectCardText(buttonEl);
         const cardLines = cardText.split('\n').map((s) => s.trim()).filter(Boolean);
-        const subjectHeader = cardLines[0] && !/View assessments/i.test(cardLines[0]) ? cardLines[0] : `Subject_${i + 1}`;
+        subjectHeader = cardLines[0] && !/View assessments/i.test(cardLines[0]) ? cardLines[0] : `Subject_${i + 1}`;
 
         const ongoingIdx = cardLines.findIndex((l) => /^Ongoing$/i.test(l));
         const ongoingCount = ongoingIdx > 0 ? parseInt(cardLines[ongoingIdx - 1], 10) : 1;
 
         if (ongoingCount === 0) {
           console.log(`[Browser Scraper] Skipping ${subjectHeader} (0 Ongoing assessments).`);
+          console.log(`[Browser Scraper] >>> Subject: "${subjectHeader}" -> Found 0 ongoing assignment(s).`);
           continue;
         }
 
         console.log(`[Browser Scraper] Inspecting ${subjectHeader} (${ongoingCount} Ongoing)...`);
         await buttonEl.click();
 
-        await page.waitForSelector('table tbody tr', { timeout: 10000 }).catch(() => { });
+        await page.waitForSelector('table tbody tr', { timeout: 12000 }).catch(() => {});
         await page.waitForTimeout(1000);
 
         const tabNames = ['Theory', 'Lab', 'Project'];
@@ -490,31 +570,40 @@ async function scrapeAssignments(customPageOrOptions = null, customUrl = null) {
             if (new RegExp(`^${tabName}\\s*\\n?\\s*0$`, 'i').test(tabText)) {
               continue;
             }
-            await tabButton.click().catch(() => { });
+            await tabButton.click().catch(() => {});
             await page.waitForTimeout(800);
           }
+
+          // Scroll table container to bottom to trigger any virtualized/infinite-scroll table rows
+          await page.evaluate(() => {
+            const tableParent = document.querySelector('table')?.parentElement;
+            if (tableParent && tableParent.scrollTo) {
+              tableParent.scrollTo(0, 10000);
+            }
+            window.scrollTo(0, document.body.scrollHeight);
+          });
+          await page.waitForTimeout(600);
 
           const items = await extractTableRowsOnCurrentTab(page, tabName, url, i);
           for (const item of items) {
             await db.upsertDeadline(item);
             if (!scrapedDeadlines.some((d) => d.assignmentId === item.assignmentId)) {
               scrapedDeadlines.push(item);
+              subjectOngoingCount++;
               console.log(`   -> Found Ongoing: [${item.subject}] ${item.title} (Due: ${item.dueDate.split('T')[0]})`);
             }
           }
         }
 
-        const innerBackBtn = page.locator('button:has(svg.lucide-chevron-left)').first();
-        if ((await innerBackBtn.count()) > 0) {
-          await innerBackBtn.click();
-        } else {
-          await page.goto(url, { waitUntil: 'domcontentloaded' });
-        }
-        await page.waitForTimeout(1500);
+        // Requirement 3: Add a log line printing each subject name and how many ongoing assignments were found for it
+        console.log(`[Browser Scraper] >>> Subject: "${subjectHeader}" -> Found ${subjectOngoingCount} ongoing assignment(s).`);
+
+        // Reliably navigate back to subject cards
+        await navigateBackToSubjectCards(page, url);
       } catch (subErr) {
-        console.warn(`[Browser Scraper] Warning on subject #${i + 1}:`, subErr.message);
-        await page.goto(url, { waitUntil: 'domcontentloaded' }).catch(() => { });
-        await page.waitForTimeout(1500);
+        console.warn(`[Browser Scraper] Warning on subject #${i + 1} (${subjectHeader}):`, subErr.message);
+        console.log(`[Browser Scraper] >>> Subject: "${subjectHeader}" -> Found ${subjectOngoingCount} ongoing assignment(s) (with warnings).`);
+        await navigateBackToSubjectCards(page, url);
       }
     }
 
@@ -626,6 +715,14 @@ async function submitAssignment({
     const savedSubjectIdx = idxMatch ? parseInt(idxMatch[1], 10) : null;
 
     console.log(`[Browser Uploader] Target Subject Card: "${subjectName}" | Target Row: "${cleanTitle}"`);
+
+    // Ensure all subject cards are scrolled and revealed
+    for (let s = 0; s < 4; s++) {
+      await page.evaluate(() => window.scrollBy(0, 500));
+      await page.waitForTimeout(200);
+    }
+    await page.evaluate(() => window.scrollTo(0, 0));
+    await page.waitForTimeout(300);
 
     let clickedSubject = false;
     const viewButtons = page.getByText(/View assessments/i);
