@@ -12,37 +12,12 @@ const db = require('../db/database');
 const scanner = require('../scanner/folderScanner');
 const notifier = require('../notifications/notifier');
 const erp = require('../browser/erpAutomation');
-
-/**
- * Common subject alias mappings for Aurora University courses
- */
-const SUBJECT_ALIASES = {
-  cs210: ['cs210', 'backend', 'node', 'express', 'api'],
-  ds201: ['ds201', 'fds', 'data science', 'foundations of data science'],
-  cs209: ['cs209', 'dsa', 'ads', 'advanced data structures', 'data structures'],
-  ma113: ['ma113', 'math', 'linear algebra'],
-  re102: ['re102', 'research', 'ethics'],
-  ec201: ['ec201', 'english'],
-};
-
-/**
- * Helper: Checks if the assignment title has a specific number (e.g., "Lab Report 4" -> "4")
- * and whether the candidate filename conflicts with it.
- */
-function hasNumberConflict(assignmentTitle, filename) {
-  const cleanTitle = assignmentTitle.replace(/\s*\(.*?\)\s*$/, '').trim();
-  const titleNums = cleanTitle.match(/\d+/g);
-  if (!titleNums || titleNums.length === 0) return false;
-
-  const requiredNum = titleNums[titleNums.length - 1];
-  const baseName = path.basename(filename, path.extname(filename));
-  const fileNums = baseName.match(/\d+/g);
-
-  if (!fileNums || !fileNums.includes(requiredNum)) {
-    return true;
-  }
-  return false;
-}
+const {
+  SUBJECT_ALIASES,
+  normalizeSubjectCodes,
+  extractSubjectCodes,
+  hasNumberConflict,
+} = require('./assignmentMatcher');
 
 /**
  * Helper: Sends Gmail + WhatsApp reminders for urgent browser-only tasks (Quizzes / Reflective Journals due <= 24h)
@@ -191,20 +166,32 @@ async function runHeuristicDecisionEngine({ deadlines, localFiles, dryRun = fals
     const subjectTokens = [...new Set([...subjectClean.split(/\s+/).filter((t) => t.length > 2), ...aliasKeywords])];
     const titleTokens = titleClean.split(/\s+/).filter((t) => t.length > 2);
 
+    const asgtCodes = extractSubjectCodes(`${asgt.subject} ${asgt.assignment_id || asgt.assignmentId}`);
+
     for (const file of localFiles) {
-      if (hasNumberConflict(asgt.title, file.filename)) {
+      const normFileName = normalizeSubjectCodes(file.filename);
+      const detectedCodes = extractSubjectCodes(file.filename);
+
+      // Strict Subject-Code Conflict Guard
+      if (detectedCodes.length > 0 && !asgtCodes.some((c) => detectedCodes.includes(c))) {
+        continue;
+      }
+
+      if (hasNumberConflict(asgt.title, normFileName)) {
         continue;
       }
 
       let score = 0;
       const reasons = [];
+      let hasSubjectMatch = false;
 
-      const fnameLower = file.filename.toLowerCase();
-      const textLower = (file.extractedText || '').toLowerCase();
+      const fnameLower = normFileName.toLowerCase();
+      const textLower = normalizeSubjectCodes(file.extractedText || '').toLowerCase();
 
       for (const token of subjectTokens) {
         if (fnameLower.includes(token)) {
           score += 40;
+          hasSubjectMatch = true;
           reasons.push(`filename matches subject '${token}'`);
           break;
         }
@@ -213,9 +200,15 @@ async function runHeuristicDecisionEngine({ deadlines, localFiles, dryRun = fals
       for (const token of subjectTokens) {
         if (textLower.includes(token)) {
           score += 20;
+          hasSubjectMatch = true;
           reasons.push(`document text matches subject '${token}'`);
           break;
         }
+      }
+
+      // Require Subject Match: Never match on lab number alone
+      if (!hasSubjectMatch) {
+        continue;
       }
 
       for (const token of titleTokens) {

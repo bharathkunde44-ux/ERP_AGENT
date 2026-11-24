@@ -200,7 +200,12 @@ async function handleIncomingDocument(message) {
     const pendingList = matchResult.availableDeadlines || [];
     const asgtList = pendingList.map((d) => `• *[${d.subject}]* ${d.title}`).join('\n') || '(No active FILE UPLOAD assignments)';
 
-    const unassignedMsg = `📄 *Document Received:* \`${sanitizedName}\`\n❓ *Could not confidently match to an active assignment.*${caption ? `\n_Caption received:_ "${caption}"` : ''}\n\n*Active FILE UPLOAD Assignments:*\n${asgtList}\n\nPlease resend the document with a caption matching your subject (e.g. *cs210 lab 5*).`;
+    let reasonNote = '';
+    if (matchResult.detectedSubjectCode) {
+      reasonNote = `\n⚠️ *Detected subject:* \`${matchResult.detectedSubjectCode}\`, but no active FILE UPLOAD assignment was found for this subject on Sidus.`;
+    }
+
+    const unassignedMsg = `📄 *Document Received:* \`${sanitizedName}\`\n❓ *Could not confidently match to an active assignment.*${caption ? `\n_Caption received:_ "${caption}"` : ''}${reasonNote}\n\n*Active FILE UPLOAD Assignments:*\n${asgtList}\n\nPlease resend the document with a caption matching your subject (e.g. *cs210 lab 5*).`;
     await notifier.sendWhatsAppMessage({ textMessage: unassignedMsg });
   }
 }

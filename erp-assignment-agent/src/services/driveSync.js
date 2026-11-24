@@ -142,7 +142,12 @@ async function syncGoogleDriveFiles() {
         const pendingList = matchResult.availableDeadlines || [];
         const asgtList = pendingList.map((d) => `• *[${d.subject}]* ${d.title}`).join('\n') || '(None active)';
 
-        const unassignedMsg = `📄 *New File Downloaded from Google Drive:* \`${sanitizedName}\`\n\n❓ Could not automatically determine the target Sidus assignment.\n\n*Active FILE UPLOAD Assignments:*\n${asgtList}\n\n_Tip: Rename the file to include the subject code (e.g. cs210_lab5.pdf) or send it via WhatsApp with a caption._`;
+        let reasonNote = '';
+        if (matchResult.detectedSubjectCode) {
+          reasonNote = `\n⚠️ *Detected subject:* \`${matchResult.detectedSubjectCode}\`, but no active FILE UPLOAD assignment was found for this subject on Sidus.\n`;
+        }
+
+        const unassignedMsg = `📄 *New File Downloaded from Google Drive:* \`${sanitizedName}\`\n\n❓ Could not automatically determine the target Sidus assignment.${reasonNote}\n\n*Active FILE UPLOAD Assignments:*\n${asgtList}\n\n_Tip: Rename the file to include the subject code (e.g. cs210_lab5.pdf) or send it via WhatsApp with a caption._`;
         await notifier.sendWhatsAppMessage({ textMessage: unassignedMsg });
       }
     }
