@@ -167,6 +167,14 @@ function buildHtmlEmail({ title, badgeText, badgeColor, items, ctaText, ctaUrl, 
 }
 
 /**
+ * Sends a Telegram alert via telegramBot service
+ */
+async function sendTelegramMessage(textMessage, options = {}) {
+  const telegramBot = require('../services/telegramBot');
+  return telegramBot.sendTelegramMessage(textMessage, options);
+}
+
+/**
  * Sends upcoming deadline alert with matching file details
  */
 async function notifyUpcomingDeadline(assignment, matchingFile = null) {
@@ -247,6 +255,26 @@ async function notifyUpcomingDeadline(assignment, matchingFile = null) {
       );
     }
   }
+
+  // Send Telegram if not throttled
+  const tgSentRecently = await db.hasAlertBeenSent(
+    assignment.assignment_id,
+    'TELEGRAM',
+    alertType,
+    12
+  );
+  if (!tgSentRecently) {
+    const res = await sendTelegramMessage(waMessage);
+    if (res && res.success) {
+      await db.recordAlert(
+        assignment.assignment_id,
+        'TELEGRAM',
+        alertType,
+        config.telegram?.chatId || 'TELEGRAM',
+        waMessage
+      );
+    }
+  }
 }
 
 /**
@@ -309,6 +337,18 @@ async function notifyAutoSubmitted(assignment, filePath, screenshotPath, confide
       'WHATSAPP',
       alertType,
       config.whatsapp.recipientPhone,
+      waMessage
+    );
+  }
+
+  // Telegram
+  const tgRes = await sendTelegramMessage(waMessage);
+  if (tgRes && tgRes.success) {
+    await db.recordAlert(
+      assignment.assignment_id,
+      'TELEGRAM',
+      alertType,
+      config.telegram?.chatId || 'TELEGRAM',
       waMessage
     );
   }
@@ -390,6 +430,26 @@ async function notifyMissingFileWarning(assignment) {
       );
     }
   }
+
+  // Send Telegram if not throttled
+  const tgSentRecently = await db.hasAlertBeenSent(
+    assignment.assignment_id,
+    'TELEGRAM',
+    alertType,
+    6
+  );
+  if (!tgSentRecently) {
+    const res = await sendTelegramMessage(waMessage);
+    if (res && res.success) {
+      await db.recordAlert(
+        assignment.assignment_id,
+        'TELEGRAM',
+        alertType,
+        config.telegram?.chatId || 'TELEGRAM',
+        waMessage
+      );
+    }
+  }
 }
 
 module.exports = {
@@ -398,5 +458,6 @@ module.exports = {
   notifyMissingFileWarning,
   sendEmail,
   sendWhatsAppMessage,
+  sendTelegramMessage,
 };
 

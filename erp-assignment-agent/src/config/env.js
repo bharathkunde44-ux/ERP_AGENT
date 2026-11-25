@@ -59,6 +59,13 @@ const config = {
     apiVersion: process.env.WHATSAPP_API_VERSION || 'v21.0',
   },
 
+  // Telegram Bot Configuration (@bharath_sidus_bot)
+  telegram: {
+    botToken: process.env.TELEGRAM_BOT_TOKEN || '',
+    chatId: (process.env.TELEGRAM_CHAT_ID || '').trim(),
+    renderUrl: (process.env.RENDER_EXTERNAL_URL || '').replace(/\/+$/, ''),
+  },
+
   // Two-Way WhatsApp Webhook Configuration
   webhook: {
     port: parseInt((process.env.PORT || process.env.WEBHOOK_PORT), 10) || 3005,
@@ -113,6 +120,12 @@ function validateConfig(options = {}) {
   if (!config.whatsapp.apiToken || !config.whatsapp.phoneNumberId || !config.whatsapp.recipientPhone) {
     warnings.push(
       '[Config Warning] WhatsApp Cloud API credentials are incomplete. WhatsApp notifications will be simulated in console.'
+    );
+  }
+
+  if (!config.telegram.botToken || !config.telegram.chatId) {
+    warnings.push(
+      '[Config Warning] Telegram credentials (TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID) are not configured. Telegram bot will be skipped.'
     );
   }
 

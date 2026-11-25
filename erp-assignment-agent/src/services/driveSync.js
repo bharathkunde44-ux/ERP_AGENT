@@ -13,6 +13,7 @@ const db = require('../db/database');
 const scanner = require('../scanner/folderScanner');
 const notifier = require('../notifications/notifier');
 const { matchAssignmentForFile } = require('../agent/assignmentMatcher');
+const telegramBot = require('./telegramBot');
 
 let isSyncRunning = false;
 
@@ -137,6 +138,19 @@ async function syncGoogleDriveFiles() {
         // Prompt student on WhatsApp for approval
         const promptMsg = `📄 *File ready (Google Drive):* \`${sanitizedName}\`\n🎯 *Matched to:* *${asgt.subject}* - *${asgt.title}*\n\nReply *approve* to submit to Sidus, or *cancel* to skip.`;
         await notifier.sendWhatsAppMessage({ textMessage: promptMsg });
+
+        // Prompt student on Telegram with interactive inline buttons
+        const tgPromptMsg = `📄 *File ready (Google Drive):* \`${sanitizedName}\`\n🎯 *Matched to:* *${asgt.subject}* - *${asgt.title}*\n\nClick below to approve submission to Sidus ERP or cancel:`;
+        await telegramBot.sendTelegramMessage(tgPromptMsg, {
+          reply_markup: {
+            inline_keyboard: [
+              [
+                { text: '✅ Approve', callback_data: 'approve_submission' },
+                { text: '❌ Cancel', callback_data: 'cancel_submission' },
+              ],
+            ],
+          },
+        });
       } else {
         console.log(`[Google Drive Sync] Could not match "${fileName}" to an active assignment.`);
         const pendingList = matchResult.availableDeadlines || [];
@@ -149,6 +163,7 @@ async function syncGoogleDriveFiles() {
 
         const unassignedMsg = `📄 *New File Downloaded from Google Drive:* \`${sanitizedName}\`\n\n❓ Could not automatically determine the target Sidus assignment.${reasonNote}\n\n*Active FILE UPLOAD Assignments:*\n${asgtList}\n\n_Tip: Rename the file to include the subject code (e.g. cs210_lab5.pdf) or send it via WhatsApp with a caption._`;
         await notifier.sendWhatsAppMessage({ textMessage: unassignedMsg });
+        await telegramBot.sendTelegramMessage(unassignedMsg);
       }
     }
 

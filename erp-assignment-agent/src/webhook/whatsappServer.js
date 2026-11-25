@@ -18,6 +18,7 @@ const erp = require('../browser/erpAutomation');
 const scanner = require('../scanner/folderScanner');
 const { matchAssignmentForFile } = require('../agent/assignmentMatcher');
 const driveSync = require('../services/driveSync');
+const telegramBot = require('../services/telegramBot');
 
 let serverInstance = null;
 
@@ -32,6 +33,19 @@ function createWebhookApp() {
 
   app.get('/health', (req, res) => {
     res.status(200).send('OK');
+  });
+
+  // Telegram Webhook Endpoint (Zero-Conflict Render Mode)
+  app.post('/telegram-webhook', (req, res) => {
+    res.sendStatus(200);
+    try {
+      const bot = telegramBot.getTelegramBot();
+      if (bot && req.body) {
+        bot.processUpdate(req.body);
+      }
+    } catch (err) {
+      console.error('[Telegram Webhook Error]:', err.message);
+    }
   });
 
   // 1. Meta Webhook Verification Handshake

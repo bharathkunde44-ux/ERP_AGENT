@@ -22,6 +22,7 @@ const { startWhatsAppWebhookServer, stopWhatsAppWebhookServer } = require('./web
 const { startFolderWatcher, stopFolderWatcher } = require('./scanner/folderWatcher');
 const { startMockServer, stopMockServer } = require('../mock_erp/mockServer');
 const driveSync = require('./services/driveSync');
+const telegramBot = require('./services/telegramBot');
 
 const args = process.argv.slice(2);
 const isLoginMode = args.includes('--login');
@@ -111,6 +112,9 @@ async function main() {
   // Start Two-Way WhatsApp Command Webhook Server
   await startWhatsAppWebhookServer();
 
+  // Start Telegram Bot Integration (@bharath_sidus_bot)
+  await telegramBot.initTelegramBot();
+
   // Start Real-Time Assignments Folder Watcher (5s debounce)
   startFolderWatcher();
 
@@ -142,6 +146,7 @@ async function main() {
     scheduledTask.stop();
     stopFolderWatcher();
     await stopWhatsAppWebhookServer();
+    await telegramBot.stopTelegramBot();
     if (mockServerInstance) {
       await stopMockServer();
     }
