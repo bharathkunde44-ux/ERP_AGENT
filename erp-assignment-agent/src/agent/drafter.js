@@ -258,7 +258,7 @@ Guidelines:
   fs.writeFileSync(filePath, draftMarkdown, 'utf8');
   console.log(`[AI Drafter] Draft saved to: ${filePath}`);
 
-  // Email draft to student
+  // Email draft to student via HTTPS (Resend / Gmail API) or SMTP fallback
   const emailSubject = `[AI Draft Ready] ${asgt.subject} - ${asgt.title}`;
   const htmlContent = `
     <div style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; background-color: #f7f9fb; padding: 24px; color: #2d3748;">
@@ -277,14 +277,25 @@ Guidelines:
     </div>
   `;
 
-  await notifier.sendEmail({
-    subject: emailSubject,
-    htmlContent,
-    textContent: `AI Starter Draft for ${asgt.title} (${asgt.subject})\n\nSaved locally at: ${filePath}\n\n${draftMarkdown}`,
-    attachments: [{ filename, path: filePath }],
-  });
+  let emailResult = { success: false, error: 'Email unconfigured' };
+  try {
+    emailResult = await notifier.sendEmail({
+      subject: emailSubject,
+      htmlContent,
+      textContent: `AI Starter Draft for ${asgt.title} (${asgt.subject})\n\nSaved locally at: ${filePath}\n\n${draftMarkdown}`,
+      attachments: [{ filename, path: filePath }],
+    });
+  } catch (emailErr) {
+    emailResult = { success: false, error: emailErr.message };
+  }
 
-  // Build compact WhatsApp preview (< 1,000 characters)
+  // Honest status reporting for email
+  const recipient = (config.email.recipient || config.email.user || 'bharathkunde44@gmail.com').trim();
+  const emailStatusLine = emailResult.success
+    ? `📧 *Emailed to:* ${recipient}`
+    : `⚠️ *Email skipped* (${emailResult.error || 'Blocked outbound SMTP'}) — full file attached above.`;
+
+  // Build compact WhatsApp/Telegram preview (< 1,000 characters)
   // Extract first 2 content paragraphs
   const previewBody = draftMarkdown
     .split('\n')
@@ -293,7 +304,27 @@ Guidelines:
     .join('\n')
     .slice(0, 400);
 
-  const previewText = `📝 *AI Draft Ready!*\n\n📌 *Subject:* ${asgt.subject}\n📋 *Task:* ${asgt.title}\n📁 *Saved to:* drafts/${filename}\n✉️ *Emailed to:* ${config.email.recipient || 'Student Inbox'}\n\n💡 *Preview Excerpt:*\n${previewBody}...\n\n✅ _Full draft saved in drafts/ & delivered to your email._`;
+  const previewText = `📝 *AI Draft Ready!*\n\n📌 *Subject:* ${asgt.subject}\n📋 *Task:* ${asgt.title}\n📁 *Saved to:* drafts/${filename}\n${emailStatusLine}\n\n💡 *Preview Excerpt:*\n${previewBody}...\n\n📎 _Full draft file attached above._`;
+
+  // 1. Send Document Attachment directly to WhatsApp
+  let waDocRes = null;
+  try {
+    waDocRes = await notifier.sendWhatsAppDocument({
+      filePath,
+      filename,
+      caption: previewText,
+    });
+  } catch (waDocErr) {
+    console.error(`[AI Drafter] WhatsApp document delivery failed: ${waDocErr.message}`);
+  }
+
+  // 2. Send Document Attachment directly to Telegram
+  let tgDocRes = null;
+  try {
+    tgDocRes = await notifier.sendTelegramDocument(filePath, filename, previewText);
+  } catch (tgDocErr) {
+    console.error(`[AI Drafter] Telegram document delivery failed: ${tgDocErr.message}`);
+  }
 
   return {
     success: true,
@@ -304,6 +335,9 @@ Guidelines:
     filePath,
     previewText,
     draftContent: draftMarkdown,
+    emailResult,
+    deliveredWhatsApp: Boolean(waDocRes?.success),
+    deliveredTelegram: Boolean(tgDocRes?.success),
   };
 }
 

@@ -411,9 +411,12 @@ _Send any command or document anytime right here in this chat!_`;
       return;
     }
 
-    await notifier.sendWhatsAppMessage({
-      textMessage: result.previewText,
-    });
+    // Only send standalone text preview if document delivery wasn't handled on WhatsApp
+    if (!result.deliveredWhatsApp) {
+      await notifier.sendWhatsAppMessage({
+        textMessage: result.previewText,
+      });
+    }
     return;
   }
 

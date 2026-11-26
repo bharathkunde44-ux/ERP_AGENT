@@ -63,6 +63,68 @@ async function sendTelegramMessage(text, options = {}) {
 }
 
 /**
+ * Safely sends a document attachment to the owner's Telegram chat.
+ * Falls back to sending without parse_mode if Markdown parsing in caption fails.
+ */
+async function sendTelegramDocument(filePath, filename, caption = '', options = {}) {
+  const token = (process.env.TELEGRAM_BOT_TOKEN || config.telegram?.botToken || '').trim();
+  const chatId = (process.env.TELEGRAM_CHAT_ID || config.telegram?.chatId || '').trim();
+
+  if (!botInstance || !token || !chatId) {
+    return { success: false, skipped: true };
+  }
+
+  if (!fs.existsSync(filePath)) {
+    return { success: false, error: `File not found on disk: ${filePath}` };
+  }
+
+  const baseFilename = filename || path.basename(filePath);
+  const trimmedCaption = caption ? caption.slice(0, 1024) : '';
+
+  try {
+    const fileStream = fs.createReadStream(filePath);
+    const msg = await botInstance.sendDocument(
+      chatId,
+      fileStream,
+      {
+        caption: trimmedCaption,
+        parse_mode: 'Markdown',
+        ...options,
+      },
+      {
+        filename: baseFilename,
+        contentType: 'text/markdown',
+      }
+    );
+    console.log(`[Telegram Document Sent] Message ID: ${msg.message_id}`);
+    return { success: true, messageId: msg.message_id };
+  } catch (err) {
+    try {
+      const fileStream = fs.createReadStream(filePath);
+      const fallbackOptions = { ...options };
+      delete fallbackOptions.parse_mode;
+      const msg = await botInstance.sendDocument(
+        chatId,
+        fileStream,
+        {
+          caption: trimmedCaption,
+          ...fallbackOptions,
+        },
+        {
+          filename: baseFilename,
+          contentType: 'text/markdown',
+        }
+      );
+      console.log(`[Telegram Document Sent (Fallback)] Message ID: ${msg.message_id}`);
+      return { success: true, messageId: msg.message_id };
+    } catch (fallbackErr) {
+      console.error(`[Telegram Error] Failed to send document: ${fallbackErr.message}`);
+      return { success: false, error: fallbackErr.message };
+    }
+  }
+}
+
+/**
  * Executes assignment submission approval
  */
 async function executeApproval(sourceLabel = 'command') {
@@ -383,7 +445,9 @@ Display this command menu.`;
       return;
     }
 
-    await sendTelegramMessage(result.previewText);
+    if (!result.deliveredTelegram) {
+      await sendTelegramMessage(result.previewText);
+    }
     return;
   }
 
@@ -581,6 +645,7 @@ module.exports = {
   initTelegramBot,
   stopTelegramBot,
   sendTelegramMessage,
+  sendTelegramDocument,
   getTelegramBot,
   handleTelegramText,
   handleTelegramDocument,

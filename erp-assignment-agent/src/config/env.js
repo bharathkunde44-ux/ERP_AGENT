@@ -41,14 +41,19 @@ const config = {
     authB64: process.env.SIDUS_AUTH_B64 || '',
   },
 
-  // Email Notification Configuration (Nodemailer / SMTP)
+  // Email Notification Configuration (Nodemailer / SMTP / Resend HTTPS / Gmail API HTTPS)
   email: {
     host: process.env.EMAIL_HOST || 'smtp.gmail.com',
     port: parseInt(process.env.EMAIL_PORT, 10) || 587,
     secure: process.env.EMAIL_SECURE === 'true',
     user: process.env.EMAIL_USER || '',
     pass: process.env.EMAIL_PASS || '',
-    recipient: process.env.ALERT_RECIPIENT_EMAIL || '',
+    recipient: process.env.ALERT_RECIPIENT_EMAIL || process.env.EMAIL_USER || '',
+    resendApiKey: process.env.RESEND_API_KEY || '',
+    resendFrom: process.env.RESEND_FROM || '',
+    googleClientId: process.env.GMAIL_CLIENT_ID || process.env.GOOGLE_CLIENT_ID || '',
+    googleClientSecret: process.env.GMAIL_CLIENT_SECRET || process.env.GOOGLE_CLIENT_SECRET || '',
+    googleRefreshToken: process.env.GMAIL_REFRESH_TOKEN || process.env.GOOGLE_REFRESH_TOKEN || '',
   },
 
   // WhatsApp Notification Configuration (Meta WhatsApp Cloud API)

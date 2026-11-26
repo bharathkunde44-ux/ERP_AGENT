@@ -1,6 +1,7 @@
 /**
- * Notification Service (Email & WhatsApp Cloud API)
- * Handles sending rich HTML emails via nodemailer and WhatsApp alerts via Meta Cloud API.
+ * Notification Service (Email, WhatsApp Cloud API & Telegram)
+ * Handles sending rich HTML emails (via Resend HTTPS, Gmail API HTTPS, or Nodemailer SMTP),
+ * WhatsApp text and document alerts via Meta Cloud API, and Telegram messages/documents.
  * Includes alert throttling and duplicate spam prevention.
  */
 
@@ -8,11 +9,12 @@ const nodemailer = require('nodemailer');
 const axios = require('axios');
 const path = require('path');
 const fs = require('fs');
+const FormData = require('form-data');
 const { config } = require('../config/env');
 const db = require('../db/database');
 
 /**
- * Creates and configures Nodemailer transporter
+ * Creates and configures Nodemailer transporter for SMTP
  */
 function createEmailTransporter() {
   if (!config.email.user || !config.email.pass) {
@@ -23,6 +25,9 @@ function createEmailTransporter() {
     host: config.email.host,
     port: config.email.port,
     secure: config.email.secure,
+    connectionTimeout: 4000,
+    greetingTimeout: 4000,
+    socketTimeout: 4000,
     auth: {
       user: config.email.user,
       pass: config.email.pass,
@@ -31,21 +36,108 @@ function createEmailTransporter() {
 }
 
 /**
- * Sends a rich Email alert
+ * Sends a rich Email alert via Resend API (HTTPS), Gmail API (HTTPS), or Nodemailer (SMTP)
+ * @returns {Promise<{ success: boolean, messageId?: string, error?: string, simulated?: boolean }>}
  */
 async function sendEmail({ subject, htmlContent, textContent, attachments = [] }) {
-  if (!config.email.user || !config.email.pass || !config.email.recipient) {
-    console.log('\n[Simulated Email Alert]');
-    console.log(`To: ${config.email.recipient || '(No recipient configured)'}`);
-    console.log(`Subject: ${subject}`);
-    console.log(`Content:\n${textContent}\n`);
-    return { success: true, simulated: true };
+  const recipient = (config.email.recipient || config.email.user || '').trim();
+  const resendApiKey = (process.env.RESEND_API_KEY || config.email.resendApiKey || '').trim();
+  const googleClientId = (process.env.GMAIL_CLIENT_ID || process.env.GOOGLE_CLIENT_ID || config.email.googleClientId || '').trim();
+  const googleClientSecret = (process.env.GMAIL_CLIENT_SECRET || process.env.GOOGLE_CLIENT_SECRET || config.email.googleClientSecret || '').trim();
+  const googleRefreshToken = (process.env.GMAIL_REFRESH_TOKEN || process.env.GOOGLE_REFRESH_TOKEN || config.email.googleRefreshToken || '').trim();
+  const isRender = Boolean(process.env.RENDER || process.env.RENDER_EXTERNAL_URL);
+
+  // 1. Prioritize Resend HTTP API (Port 443 HTTPS - Works reliably on Render Free Tier)
+  if (resendApiKey) {
+    try {
+      const resendFrom = (process.env.RESEND_FROM || config.email.resendFrom || 'College ERP Agent <onboarding@resend.dev>').trim();
+      const resendAttachments = attachments
+        .filter((att) => att.path && fs.existsSync(att.path))
+        .map((att) => ({
+          filename: att.filename || path.basename(att.path),
+          content: fs.readFileSync(att.path).toString('base64'),
+        }));
+
+      const res = await axios.post(
+        'https://api.resend.com/emails',
+        {
+          from: resendFrom,
+          to: [recipient || 'delivered@resend.dev'],
+          subject,
+          html: htmlContent,
+          text: textContent,
+          attachments: resendAttachments.length > 0 ? resendAttachments : undefined,
+        },
+        {
+          headers: {
+            Authorization: `Bearer ${resendApiKey}`,
+            'Content-Type': 'application/json',
+          },
+          timeout: 15000,
+        }
+      );
+
+      const msgId = res.data?.id;
+      console.log(`[Email Sent via Resend HTTPS] ID: ${msgId}`);
+      return { success: true, messageId: msgId, provider: 'resend' };
+    } catch (err) {
+      const errMsg = err.response?.data?.message || err.response?.data?.error?.message || err.message;
+      console.error(`[Email Failed via Resend] Error: ${errMsg}`);
+      return { success: false, error: `Resend API: ${errMsg}` };
+    }
   }
 
+  // 2. Google OAuth / Gmail API (Port 443 HTTPS)
+  if (googleClientId && googleClientSecret && googleRefreshToken) {
+    try {
+      const { google } = require('googleapis');
+      const oauth2Client = new google.auth.OAuth2(googleClientId, googleClientSecret);
+      oauth2Client.setCredentials({ refresh_token: googleRefreshToken });
+      const gmail = google.gmail({ version: 'v1', auth: oauth2Client });
+
+      const mailComposer = nodemailer.createTransport({ streamTransport: true, buffer: true });
+      const mail = await mailComposer.sendMail({
+        from: `"College ERP Agent" <${config.email.user || recipient}>`,
+        to: recipient,
+        subject,
+        text: textContent,
+        html: htmlContent,
+        attachments: attachments.filter((att) => att.path && fs.existsSync(att.path)),
+      });
+
+      const rawBase64 = Buffer.from(mail.message)
+        .toString('base64')
+        .replace(/\+/g, '-')
+        .replace(/\//g, '_')
+        .replace(/=+$/, '');
+
+      const res = await gmail.users.messages.send({
+        userId: 'me',
+        requestBody: { raw: rawBase64 },
+      });
+
+      console.log(`[Email Sent via Gmail API HTTPS] ID: ${res.data?.id}`);
+      return { success: true, messageId: res.data?.id, provider: 'gmail_api' };
+    } catch (err) {
+      console.error(`[Email Failed via Gmail API] Error: ${err.message}`);
+      return { success: false, error: `Gmail API: ${err.message}` };
+    }
+  }
+
+  // 3. Fallback: Nodemailer SMTP
+  if (!config.email.user || !config.email.pass || !recipient) {
+    console.log('\n[Simulated Email Alert]');
+    console.log(`To: ${recipient || '(No recipient configured)'}`);
+    console.log(`Subject: ${subject}`);
+    console.log(`Content:\n${textContent}\n`);
+    return { success: false, error: 'Email credentials not configured', simulated: true };
+  }
+
+  // Render Free Tier blocks outbound SMTP ports 25, 465, and 587.
   const transporter = createEmailTransporter();
   const mailOptions = {
     from: `"College ERP Agent" <${config.email.user}>`,
-    to: config.email.recipient,
+    to: recipient,
     subject,
     text: textContent,
     html: htmlContent,
@@ -54,11 +146,15 @@ async function sendEmail({ subject, htmlContent, textContent, attachments = [] }
 
   try {
     const info = await transporter.sendMail(mailOptions);
-    console.log(`[Email Sent] Message ID: ${info.messageId}`);
-    return { success: true, messageId: info.messageId };
+    console.log(`[Email Sent via SMTP] Message ID: ${info.messageId}`);
+    return { success: true, messageId: info.messageId, provider: 'smtp' };
   } catch (error) {
-    console.error(`[Email Failed] Error sending email: ${error.message}`);
-    return { success: false, error: error.message };
+    let cleanErr = error.message;
+    if (error.code === 'ETIMEDOUT' || error.code === 'ECONNREFUSED' || isRender) {
+      cleanErr = 'Render blocks outbound SMTP (ports 465/587). Please set RESEND_API_KEY in Render.';
+    }
+    console.error(`[Email Failed] Error sending email: ${cleanErr}`);
+    return { success: false, error: cleanErr };
   }
 }
 
@@ -104,6 +200,85 @@ async function sendWhatsAppMessage({ textMessage }) {
   } catch (error) {
     const errMsg = error.response?.data?.error?.message || error.message;
     console.error(`[WhatsApp Failed] Meta API Error: ${errMsg}`);
+    return { success: false, error: errMsg };
+  }
+}
+
+/**
+ * Sends a document file via Meta WhatsApp Cloud API
+ */
+async function sendWhatsAppDocument({ filePath, filename, caption = '' }) {
+  if (
+    !config.whatsapp.apiToken ||
+    !config.whatsapp.phoneNumberId ||
+    !config.whatsapp.recipientPhone
+  ) {
+    console.log('\n[Simulated WhatsApp Document Alert]');
+    console.log(`To: ${config.whatsapp.recipientPhone || '(No phone configured)'}`);
+    console.log(`File: ${filePath} (${filename || path.basename(filePath)})`);
+    console.log(`Caption:\n${caption}\n`);
+    return { success: true, simulated: true };
+  }
+
+  if (!fs.existsSync(filePath)) {
+    console.error(`[WhatsApp Document] File does not exist: ${filePath}`);
+    return { success: false, error: 'File not found on disk' };
+  }
+
+  const cleanPhone = config.whatsapp.recipientPhone.replace(/[^0-9]/g, '');
+  const baseFilename = filename || path.basename(filePath);
+
+  try {
+    // 1. Upload media to Meta WhatsApp Cloud API
+    const form = new FormData();
+    form.append('messaging_product', 'whatsapp');
+    form.append('file', fs.createReadStream(filePath), {
+      filename: baseFilename,
+      contentType: 'text/plain',
+    });
+    form.append('type', 'text/plain');
+
+    const uploadUrl = `https://graph.facebook.com/${config.whatsapp.apiVersion}/${config.whatsapp.phoneNumberId}/media`;
+    const uploadRes = await axios.post(uploadUrl, form, {
+      headers: {
+        Authorization: `Bearer ${config.whatsapp.apiToken}`,
+        ...form.getHeaders(),
+      },
+      timeout: 30000,
+    });
+
+    const mediaId = uploadRes.data?.id;
+    if (!mediaId) {
+      throw new Error('Meta did not return a media ID for the uploaded file');
+    }
+
+    // 2. Send document message with media ID
+    const msgUrl = `https://graph.facebook.com/${config.whatsapp.apiVersion}/${config.whatsapp.phoneNumberId}/messages`;
+    const msgPayload = {
+      messaging_product: 'whatsapp',
+      recipient_type: 'individual',
+      to: cleanPhone,
+      type: 'document',
+      document: {
+        id: mediaId,
+        filename: baseFilename,
+        caption: caption ? caption.slice(0, 1024) : '',
+      },
+    };
+
+    const msgRes = await axios.post(msgUrl, msgPayload, {
+      headers: {
+        Authorization: `Bearer ${config.whatsapp.apiToken}`,
+        'Content-Type': 'application/json',
+      },
+      timeout: 30000,
+    });
+
+    console.log(`[WhatsApp Document Sent] Message ID: ${msgRes.data.messages?.[0]?.id || 'OK'}`);
+    return { success: true, messageId: msgRes.data.messages?.[0]?.id };
+  } catch (error) {
+    const errMsg = error.response?.data?.error?.message || error.message;
+    console.error(`[WhatsApp Document Failed] Error: ${errMsg}`);
     return { success: false, error: errMsg };
   }
 }
@@ -172,6 +347,17 @@ function buildHtmlEmail({ title, badgeText, badgeColor, items, ctaText, ctaUrl, 
 async function sendTelegramMessage(textMessage, options = {}) {
   const telegramBot = require('../services/telegramBot');
   return telegramBot.sendTelegramMessage(textMessage, options);
+}
+
+/**
+ * Sends a Telegram document attachment via telegramBot service
+ */
+async function sendTelegramDocument(filePath, filename, caption = '', options = {}) {
+  const telegramBot = require('../services/telegramBot');
+  if (typeof telegramBot.sendTelegramDocument === 'function') {
+    return telegramBot.sendTelegramDocument(filePath, filename, caption, options);
+  }
+  return { success: false, skipped: true };
 }
 
 /**
@@ -458,6 +644,8 @@ module.exports = {
   notifyMissingFileWarning,
   sendEmail,
   sendWhatsAppMessage,
+  sendWhatsAppDocument,
   sendTelegramMessage,
+  sendTelegramDocument,
 };
 
